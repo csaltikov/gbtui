@@ -16,6 +16,11 @@ pub struct GcCounts {
     /// any G or C.
     pub cumulative_min: Option<usize>,
     pub cumulative_max: Option<usize>,
+    /// Cumulative skew (G count minus C count) at its minimum, at its
+    /// maximum, and at the end of the sequence. It is 0 at the start.
+    pub walk_min: i64,
+    pub walk_max: i64,
+    pub walk_end: i64,
 }
 
 fn is_g(b: u8) -> bool {
@@ -35,25 +40,26 @@ impl GcCounts {
         g.push(0);
         c.push(0);
 
-        // Cumulative skew: +1 per G, -1 per C along the sequence.
+        // Cumulative skew: +1 per G, -1 per C along the sequence, starting
+        // at 0 before the first base, so the start counts as an extreme.
         let (mut walk, mut min, mut max) = (0i64, 0i64, 0i64);
-        let (mut min_at, mut max_at) = (None, None);
+        let (mut min_at, mut max_at) = (0usize, 0usize);
 
         for (i, chunk) in seq.chunks(BLOCK).enumerate() {
             for (j, &b) in chunk.iter().enumerate() {
                 if is_g(b) {
                     total_g += 1;
                     walk += 1;
-                    if walk > max || max_at.is_none() {
+                    if walk > max {
                         max = walk;
-                        max_at = Some(i * BLOCK + j);
+                        max_at = i * BLOCK + j;
                     }
                 } else if is_c(b) {
                     total_c += 1;
                     walk -= 1;
-                    if walk < min || min_at.is_none() {
+                    if walk < min {
                         min = walk;
-                        min_at = Some(i * BLOCK + j);
+                        min_at = i * BLOCK + j;
                     }
                 }
             }
@@ -61,11 +67,15 @@ impl GcCounts {
             c.push(total_c);
         }
 
+        let has_gc = total_g + total_c > 0;
         GcCounts {
             g,
             c,
-            cumulative_min: min_at,
-            cumulative_max: max_at,
+            cumulative_min: has_gc.then_some(min_at),
+            cumulative_max: has_gc.then_some(max_at),
+            walk_min: min,
+            walk_max: max,
+            walk_end: walk,
         }
     }
 
@@ -128,11 +138,28 @@ mod tests {
     }
 
     #[test]
+    fn the_start_counts_as_an_extreme() {
+        // Never drops below where it started: the minimum is the start,
+        // not the lone C.
+        let seq = b"GAGAGACGAGA";
+        let counts = GcCounts::new(seq);
+        assert_eq!(counts.cumulative_min, Some(0));
+        // And the mirror image.
+        let counts = GcCounts::new(b"CACACAGCACA");
+        assert_eq!(counts.cumulative_max, Some(0));
+        assert_eq!(GcCounts::new(b"ATAT").cumulative_min, None);
+    }
+
+    #[test]
     fn cumulative_extremes() {
         // Walk: C C C G G G G G -> -1 -2 -3 -2 -1 0 1 2
         let seq = b"CCCGGGGG";
         let counts = GcCounts::new(seq);
         assert_eq!(counts.cumulative_min, Some(2));
         assert_eq!(counts.cumulative_max, Some(7));
+        assert_eq!(
+            (counts.walk_min, counts.walk_max, counts.walk_end),
+            (-3, 2, 2)
+        );
     }
 }

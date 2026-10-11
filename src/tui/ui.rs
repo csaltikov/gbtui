@@ -482,7 +482,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
                 thousands(app.layout().shown.len())
             )));
             if let Some(gc) = &app.layout().gc {
-                lines.push(Line::from(gc_summary(gc, record.topology)));
+                lines.push(Line::from(gc_summary(gc, record.topology, record.len())));
             }
             lines.push(Line::from(""));
             lines.push(
@@ -506,20 +506,68 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// Where the cumulative GC skew bottoms out and peaks. On a circular
-/// bacterial chromosome these mark the likely origin and terminus.
-fn gc_summary(gc: &GcCounts, topology: Topology) -> String {
+/// Where the GC skew changes sign, from the cumulative skew's lowest and
+/// highest points.
+///
+/// On a circular record these are reported as the likely origin and
+/// terminus; the ends are joined, so an extreme near position 1 is real
+/// (many genomes are numbered from dnaA, next to oriC).
+///
+/// On a linear record (a contig or partial genome) an extreme is reported
+/// only if it is a real turnaround: away from the ends (an extreme within
+/// `EDGE_FRACTION` of an end just means the skew never turned around inside
+/// the sequence), and with the cumulative skew climbing back from it on
+/// both sides by at least `MIN_TURN` of its total range (so a noise wobble
+/// doesn't count). Changes are described by direction rather than as
+/// origin or terminus, because a contig's orientation is arbitrary.
+fn gc_summary(gc: &GcCounts, topology: Topology, len: usize) -> String {
+    /// Share of the length at each end of a linear sequence where an
+    /// extreme is treated as an artefact of where the sequence stops.
+    const EDGE_FRACTION: usize = 100; // 1%
+    /// Smallest turnaround, as a share of the cumulative skew's range.
+    const MIN_TURN: f64 = 0.05;
+
     let (Some(min), Some(max)) = (gc.cumulative_min, gc.cumulative_max) else {
         return "GC skew: no G or C in this sequence".to_string();
     };
-    let (min, max) = (thousands(min + 1), thousands(max + 1));
-    match topology {
-        Topology::Circular => format!(
-            "Cumulative GC skew: minimum at {min} (likely origin), maximum at {max} (likely terminus)"
-        ),
-        Topology::Linear => {
-            format!("Cumulative GC skew: minimum at {min}, maximum at {max}")
-        }
+
+    if topology == Topology::Circular {
+        return format!(
+            "Cumulative GC skew: minimum at {} (likely origin), maximum at {} (likely terminus)",
+            thousands(min + 1),
+            thousands(max + 1)
+        );
+    }
+
+    let margin = len / EDGE_FRACTION;
+    let interior = |pos: usize| pos >= margin && pos + margin < len;
+    // The walk is 0 at the start and `walk_end` at the end; a minimum must
+    // sit clearly below both, a maximum clearly above both.
+    let range = (gc.walk_max - gc.walk_min).max(1) as f64;
+    let turn = |depth: i64| depth as f64 >= MIN_TURN * range;
+    let min_turns = turn(0.min(gc.walk_end) - gc.walk_min);
+    let max_turns = turn(gc.walk_max - 0.max(gc.walk_end));
+    let mut changes = Vec::new();
+    // The cumulative skew falls while the skew is negative and rises while
+    // it is positive, so its minimum is a − to + change and its maximum a
+    // + to − change.
+    if interior(min) && min_turns {
+        changes.push((min, format!("− to + at {}", thousands(min + 1))));
+    }
+    if interior(max) && max_turns {
+        changes.push((max, format!("+ to − at {}", thousands(max + 1))));
+    }
+    changes.sort();
+
+    if changes.is_empty() {
+        "GC skew keeps one sign across this sequence (it may lie within one replication arm)"
+            .to_string()
+    } else {
+        let list: Vec<String> = changes.into_iter().map(|(_, text)| text).collect();
+        format!(
+            "GC skew changes sign within this sequence: {}",
+            list.join(", ")
+        )
     }
 }
 
@@ -866,30 +914,69 @@ mod tests {
     fn gc_skew_track_toggles() {
         let mut app = fixture_app();
         let screen = render(&mut app, 120, 24);
-        let gc_line = screen
-            .lines()
-            .find(|l| l.starts_with("GC"))
-            .unwrap_or_else(|| panic!("no GC track:\n{screen}"));
-        assert!(gc_line.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c)), "{gc_line}");
+        // The track row starts "GC" and holds bars; the summary text
+        // ("GC skew ...") also starts with "GC" but has no bars.
+        let is_track = |l: &str| l.starts_with("GC") && l.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c));
+        assert!(screen.lines().any(is_track), "no GC track:\n{screen}");
+        // The fixture is a linear 5 kb slice, so it gets the linear wording.
         assert!(
-            screen.contains("Cumulative GC skew: minimum at"),
+            screen.contains("GC skew changes sign within this sequence")
+                || screen.contains("GC skew keeps one sign across this sequence"),
             "{screen}"
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         let screen = render(&mut app, 120, 24);
-        assert!(!screen.lines().any(|l| l.starts_with("GC")), "{screen}");
+        assert!(!screen.lines().any(is_track), "{screen}");
     }
 
     #[test]
     fn gc_summary_wording() {
+        let seq = |parts: &[(&str, usize)]| -> Vec<u8> {
+            parts
+                .iter()
+                .flat_map(|(b, n)| b.repeat(*n).into_bytes())
+                .collect()
+        };
+
+        // Circular: extremes reported wherever they fall, ends included.
         let gc = GcCounts::new(b"CCCGGGGG");
         assert_eq!(
-            gc_summary(&gc, Topology::Circular),
+            gc_summary(&gc, Topology::Circular, 8),
             "Cumulative GC skew: minimum at 3 (likely origin), maximum at 8 (likely terminus)"
         );
+
+        // Linear, both changes inside: listed in position order.
+        let s = seq(&[("G", 300), ("C", 400), ("G", 300)]);
         assert_eq!(
-            gc_summary(&GcCounts::new(b"ATAT"), Topology::Linear),
+            gc_summary(&GcCounts::new(&s), Topology::Linear, s.len()),
+            "GC skew changes sign within this sequence: + to − at 300, − to + at 700"
+        );
+
+        // Linear, one change inside; the other extreme is just the end.
+        let s = seq(&[("C", 500), ("G", 500)]);
+        assert_eq!(
+            gc_summary(&GcCounts::new(&s), Topology::Linear, s.len()),
+            "GC skew changes sign within this sequence: − to + at 500"
+        );
+
+        // Linear, a small dip near the start of a G-rich stretch: a wobble,
+        // not a turnaround.
+        let s = seq(&[("GA", 20), ("C", 30), ("GGA", 1000)]);
+        assert_eq!(
+            gc_summary(&GcCounts::new(&s), Topology::Linear, s.len()),
+            "GC skew keeps one sign across this sequence (it may lie within one replication arm)"
+        );
+
+        // Linear, one sign throughout (part of one replication arm).
+        let s = seq(&[("GA", 500), ("C", 1), ("GA", 499)]);
+        assert_eq!(
+            gc_summary(&GcCounts::new(&s), Topology::Linear, s.len()),
+            "GC skew keeps one sign across this sequence (it may lie within one replication arm)"
+        );
+
+        assert_eq!(
+            gc_summary(&GcCounts::new(b"ATAT"), Topology::Linear, 4),
             "GC skew: no G or C in this sequence"
         );
     }
