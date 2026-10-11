@@ -1,6 +1,7 @@
 //! Interactive terminal viewer (`genome-viewer -i`).
 
 mod app;
+mod gc;
 mod tracks;
 mod ui;
 

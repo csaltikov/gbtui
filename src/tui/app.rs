@@ -2,12 +2,15 @@
 //! can be tested directly.
 
 use std::ops::Range;
+use std::path::PathBuf;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 
+use super::gc::GcCounts;
 use super::tracks::pack_lanes;
 use crate::model::{Feature, Record, Strand};
+use crate::settings::Settings;
 
 /// Width assumed until the first frame reports the real one.
 const DEFAULT_COLS: usize = 100;
@@ -37,6 +40,8 @@ pub struct Layout {
     pub reverse_lanes: usize,
     /// Longest feature extent, so window lookups can binary-search on start.
     max_extent: usize,
+    /// GC counts for the skew track; `None` if the record has no sequence.
+    pub gc: Option<GcCounts>,
 }
 
 impl Layout {
@@ -94,6 +99,7 @@ impl Layout {
             forward_lanes,
             reverse_lanes,
             max_extent,
+            gc: (!record.sequence.is_empty()).then(|| GcCounts::new(&record.sequence)),
         }
     }
 
@@ -180,6 +186,9 @@ pub struct App {
     pub list_page: usize,
     pub sort: SortKey,
     pub sort_reverse: bool,
+    pub settings: Settings,
+    /// Where to save settings when they change; `None` never saves.
+    settings_path: Option<PathBuf>,
 }
 
 impl App {
@@ -210,9 +219,33 @@ impl App {
             list_page: 10,
             sort: SortKey::Position,
             sort_reverse: false,
+            settings: Settings::default(),
+            settings_path: None,
         };
         app.reset_view();
         app
+    }
+
+    /// Use remembered settings, saving changes back to `path`.
+    pub fn with_settings(mut self, settings: Settings, path: Option<PathBuf>) -> Self {
+        self.settings = settings;
+        self.settings_path = path;
+        self
+    }
+
+    fn toggle_gc_skew(&mut self) {
+        self.settings.gc_skew = !self.settings.gc_skew;
+        let state = if self.settings.gc_skew { "on" } else { "off" };
+        self.message = Some(match &self.settings_path {
+            Some(path) => match self.settings.save(path) {
+                Ok(()) => format!("GC skew track {state} (remembered)"),
+                Err(e) => format!(
+                    "GC skew track {state} (couldn't save {}: {e})",
+                    path.display()
+                ),
+            },
+            None => format!("GC skew track {state}"),
+        });
     }
 
     pub fn record(&self) -> &Record {
@@ -360,6 +393,7 @@ impl App {
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('f') => self.open_list(),
             KeyCode::Enter => self.zoom_to_selected(),
+            KeyCode::Char('c') => self.toggle_gc_skew(),
             _ => {}
         }
     }
@@ -957,6 +991,37 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.window(), 0..5000);
         assert!(app.message.as_deref().unwrap().contains("Nothing selected"));
+    }
+
+    #[test]
+    fn c_toggles_gc_skew_and_saves_it() {
+        let dir = std::env::temp_dir().join(format!("genome-viewer-app-{}", std::process::id()));
+        let path = dir.join("settings.conf");
+        let mut app = fixture_app(None).with_settings(Settings::default(), Some(path.clone()));
+        assert!(app.settings.gc_skew);
+
+        press(&mut app, KeyCode::Char('c'));
+        assert!(!app.settings.gc_skew);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("GC skew track off (remembered)")
+        );
+        assert_eq!(Settings::load(&path), Settings { gc_skew: false });
+
+        // Works from the feature list too.
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(Settings::load(&path), Settings { gc_skew: true });
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn toggle_without_a_settings_path_does_not_save() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('c'));
+        assert!(!app.settings.gc_skew);
+        assert_eq!(app.message.as_deref(), Some("GC skew track off"));
     }
 
     #[test]

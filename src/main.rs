@@ -1,5 +1,6 @@
 mod model;
 mod parser;
+mod settings;
 mod tui;
 
 use std::collections::HashMap;
@@ -113,7 +114,13 @@ fn main() -> Result<()> {
         if records.is_empty() {
             bail!("no records found in {}", cli.file.display());
         }
-        let app = tui::App::new(records, &|f| cli.wants(f), cli.region.clone());
+        let settings_path = settings::Settings::default_path();
+        let settings = settings_path
+            .as_deref()
+            .map(settings::Settings::load)
+            .unwrap_or_default();
+        let app = tui::App::new(records, &|f| cli.wants(f), cli.region.clone())
+            .with_settings(settings, settings_path);
         return tui::run(app);
     }
 
