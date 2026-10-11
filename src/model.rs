@@ -154,6 +154,13 @@ impl Location {
     pub fn end(&self) -> usize {
         self.segments.iter().map(|s| s.end).max().unwrap_or(0)
     }
+
+    /// Whether any segment overlaps a 0-based half-open window.
+    pub fn overlaps(&self, window: &Range<usize>) -> bool {
+        self.segments
+            .iter()
+            .any(|s| s.start < window.end && window.start < s.end)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
