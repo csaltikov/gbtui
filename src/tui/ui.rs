@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row as TableRow, Table, Wrap};
 
 use super::app::{App, Mode, SortKey, Track};
-use super::gc::GcCounts;
+use super::gc::{GcCounts, MIN_SKEW_LENGTH};
 use super::tracks::{density, location_string, spark, tick_spacing};
 use crate::model::{Feature, FeatureKind, Strand, Topology};
 use crate::thousands;
@@ -483,6 +483,14 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
             )));
             if let Some(gc) = &app.layout().gc {
                 lines.push(Line::from(gc_summary(gc, record.topology, record.len())));
+            } else if !record.sequence.is_empty() {
+                lines.push(
+                    Line::from(format!(
+                        "GC skew: not shown for sequences under {} kb (too short to be meaningful)",
+                        MIN_SKEW_LENGTH / 1000
+                    ))
+                    .dim(),
+                );
             }
             lines.push(Line::from(""));
             lines.push(
@@ -807,6 +815,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
+    use crate::model::Record;
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -824,10 +833,13 @@ mod tests {
             .join("\n")
     }
 
-    fn fixture_app() -> App {
+    fn parse_fixture() -> Record {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/CP000283_5k.gb");
-        let records = crate::parser::parse_file(&path).unwrap();
-        App::new(records, &|f| f.kind == FeatureKind::Cds, None)
+        crate::parser::parse_file(&path).unwrap().remove(0)
+    }
+
+    fn fixture_app() -> App {
+        App::new(vec![parse_fixture()], &|f| f.kind == FeatureKind::Cds, None)
     }
 
     #[test]
@@ -912,22 +924,39 @@ mod tests {
 
     #[test]
     fn gc_skew_track_toggles() {
-        let mut app = fixture_app();
+        // 40 kb with a G excess (skew +1/3), long enough to get the track.
+        let record = Record {
+            sequence: b"GGCA".repeat(10_000),
+            topology: Topology::Linear,
+            ..parse_fixture()
+        };
+        let mut app = App::new(vec![record], &|f| f.kind == FeatureKind::Cds, None);
         let screen = render(&mut app, 120, 24);
         // The track row starts "GC" and holds bars; the summary text
         // ("GC skew ...") also starts with "GC" but has no bars.
         let is_track = |l: &str| l.starts_with("GC") && l.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c));
         assert!(screen.lines().any(is_track), "no GC track:\n{screen}");
-        // The fixture is a linear 5 kb slice, so it gets the linear wording.
         assert!(
-            screen.contains("GC skew changes sign within this sequence")
-                || screen.contains("GC skew keeps one sign across this sequence"),
+            screen.contains("GC skew keeps one sign across this sequence"),
             "{screen}"
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         let screen = render(&mut app, 120, 24);
         assert!(!screen.lines().any(is_track), "{screen}");
+    }
+
+    #[test]
+    fn short_records_have_no_gc_skew() {
+        // The 5 kb fixture is under the cut-off.
+        let mut app = fixture_app();
+        let screen = render(&mut app, 120, 24);
+        let is_track = |l: &str| l.starts_with("GC") && l.chars().any(|c| "▁▂▃▄▅▆▇█".contains(c));
+        assert!(!screen.lines().any(is_track), "{screen}");
+        assert!(
+            screen.contains("GC skew: not shown for sequences under 20 kb"),
+            "{screen}"
+        );
     }
 
     #[test]

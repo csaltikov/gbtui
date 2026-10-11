@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 
-use super::gc::GcCounts;
+use super::gc::{GcCounts, MIN_SKEW_LENGTH};
 use super::tracks::pack_lanes;
 use crate::model::{Feature, Record, Strand};
 use crate::settings::Settings;
@@ -112,7 +112,7 @@ impl Layout {
             forward_lanes,
             reverse_lanes,
             max_extent,
-            gc: (!record.sequence.is_empty()).then(|| GcCounts::new(&record.sequence)),
+            gc: (record.len() >= MIN_SKEW_LENGTH).then(|| GcCounts::new(&record.sequence)),
         }
     }
 
@@ -250,6 +250,14 @@ impl App {
     }
 
     fn toggle_gc_skew(&mut self) {
+        // Leave the saved preference alone on records too short to show it.
+        if self.layout().gc.is_none() {
+            self.message = Some(format!(
+                "GC skew isn't shown for sequences under {} kb; setting unchanged",
+                MIN_SKEW_LENGTH / 1000
+            ));
+            return;
+        }
         self.settings.gc_skew = !self.settings.gc_skew;
         let state = if self.settings.gc_skew { "on" } else { "off" };
         self.message = Some(match &self.settings_path {
@@ -1151,7 +1159,7 @@ mod tests {
     fn c_toggles_gc_skew_and_saves_it() {
         let dir = std::env::temp_dir().join(format!("genome-viewer-app-{}", std::process::id()));
         let path = dir.join("settings.conf");
-        let mut app = fixture_app(None).with_settings(Settings::default(), Some(path.clone()));
+        let mut app = synthetic_app(100_000).with_settings(Settings::default(), Some(path.clone()));
         assert!(app.settings.gc_skew);
 
         press(&mut app, KeyCode::Char('c'));
@@ -1172,7 +1180,7 @@ mod tests {
 
     #[test]
     fn toggle_without_a_settings_path_does_not_save() {
-        let mut app = fixture_app(None);
+        let mut app = synthetic_app(100_000);
         press(&mut app, KeyCode::Char('c'));
         assert!(!app.settings.gc_skew);
         assert_eq!(app.message.as_deref(), Some("GC skew track off"));
@@ -1431,6 +1439,28 @@ mod tests {
             type_text(&mut app, &format!("{}", 1000 + i * 1000));
         }
         assert_eq!(app.history.len(), HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn c_on_a_short_record_explains_and_keeps_the_setting() {
+        let dir = std::env::temp_dir().join(format!("genome-viewer-short-{}", std::process::id()));
+        let path = dir.join("settings.conf");
+        // The fixture is 5 kb, under the cut-off.
+        let mut app = fixture_app(None).with_settings(Settings::default(), Some(path.clone()));
+        assert!(app.layout().gc.is_none());
+        press(&mut app, KeyCode::Char('c'));
+        assert!(app.settings.gc_skew);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("GC skew isn't shown for sequences under 20 kb; setting unchanged")
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn gc_skew_cut_off_is_20_kb() {
+        assert!(synthetic_app(20_000).layout().gc.is_some());
+        assert!(synthetic_app(19_996).layout().gc.is_none());
     }
 
     #[test]

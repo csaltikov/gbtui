@@ -2,6 +2,10 @@
 
 use std::ops::Range;
 
+/// Shortest sequence GC skew is shown for. Below this the skew is mostly
+/// noise, but small plasmids (~20 kb) still get it.
+pub const MIN_SKEW_LENGTH: usize = 20_000;
+
 /// Bases per block of the running totals. Smaller blocks mean less scanning
 /// at window edges; larger ones mean less memory (two `u32`s per block).
 const BLOCK: usize = 64;
