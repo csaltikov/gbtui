@@ -488,7 +488,7 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(
                 Line::from(
                     "Tab: select next feature   f: feature list   /: search   g: go to   \
-                     c: GC skew on/off   ?: help",
+                     Backspace: back   c: GC skew on/off   ?: help",
                 )
                 .dim(),
             );
@@ -711,6 +711,7 @@ const HELP: &[(&str, &str)] = &[
     ("/", "search locus tag, gene, product, protein ID"),
     ("n N", "next / previous match"),
     ("g", "go to position, START..END, or locus tag"),
+    ("Backspace b", "back to the view before the last jump"),
     ("[ ]", "previous / next record"),
     ("Esc", "clear selection and search"),
     ("f", "open / close the feature list"),

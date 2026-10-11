@@ -16,6 +16,17 @@ use crate::settings::Settings;
 const DEFAULT_COLS: usize = 100;
 /// Widest view `g` leaves you at after going to a single position.
 const GO_TO_SPAN: usize = 10_000;
+/// Earlier views remembered for jumping back.
+const HISTORY_LIMIT: usize = 50;
+
+/// Where the viewer was: enough to come back to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViewState {
+    record: usize,
+    start: usize,
+    span: usize,
+    selected: Option<usize>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -191,6 +202,8 @@ pub struct App {
     pub settings: Settings,
     /// Where to save settings when they change; `None` never saves.
     settings_path: Option<PathBuf>,
+    /// Views before each jump, most recent last.
+    history: Vec<ViewState>,
 }
 
 impl App {
@@ -223,6 +236,7 @@ impl App {
             sort_reverse: false,
             settings: Settings::default(),
             settings_path: None,
+            history: Vec::new(),
         };
         app.reset_view();
         app
@@ -343,12 +357,13 @@ impl App {
             Mode::Normal => self.handle_normal(key),
             Mode::Help => {}
             Mode::GoTo(input) => {
-                if let Some(input) = edit_input(input, key, |s| self.go_to(&s)) {
+                if let Some(input) = edit_input(input, key, |s| self.jump(|app| app.go_to(&s))) {
                     self.mode = Mode::GoTo(input);
                 }
             }
             Mode::Search(input) => {
-                if let Some(input) = edit_input(input, key, |s| self.search_for(&s)) {
+                if let Some(input) = edit_input(input, key, |s| self.jump(|app| app.search_for(&s)))
+                {
                     self.mode = Mode::Search(input);
                 }
             }
@@ -367,17 +382,17 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.pan(0.1),
             KeyCode::PageUp => self.pan(-0.9),
             KeyCode::PageDown => self.pan(0.9),
-            KeyCode::Home => {
-                self.start = 0;
-                self.clamp();
-            }
-            KeyCode::End => {
-                self.start = usize::MAX;
-                self.clamp();
-            }
+            KeyCode::Home => self.jump(|app| {
+                app.start = 0;
+                app.clamp();
+            }),
+            KeyCode::End => self.jump(|app| {
+                app.start = usize::MAX;
+                app.clamp();
+            }),
             KeyCode::Char('+' | '=') => self.zoom_in(),
             KeyCode::Char('-' | '_') => self.zoom_out(),
-            KeyCode::Char('0') => self.set_view(0..self.record().len()),
+            KeyCode::Char('0') => self.jump(|app| app.set_view(0..app.record().len())),
             KeyCode::Tab => self.next_feature(),
             KeyCode::BackTab => self.prev_feature(),
             KeyCode::Up | KeyCode::Char('k') => {
@@ -387,17 +402,70 @@ impl App {
                 self.detail_scroll = self.detail_scroll.saturating_add(1)
             }
             KeyCode::Char('/') => self.mode = Mode::Search(String::new()),
-            KeyCode::Char('n') => self.cycle_match(true),
-            KeyCode::Char('N') => self.cycle_match(false),
+            KeyCode::Char('n') => self.jump(|app| app.cycle_match(true)),
+            KeyCode::Char('N') => self.jump(|app| app.cycle_match(false)),
             KeyCode::Char('g') => self.mode = Mode::GoTo(String::new()),
-            KeyCode::Char(']') => self.switch_record(1),
-            KeyCode::Char('[') => self.switch_record(-1),
+            KeyCode::Char(']') => self.jump(|app| app.switch_record(1)),
+            KeyCode::Char('[') => self.jump(|app| app.switch_record(-1)),
+            KeyCode::Backspace | KeyCode::Char('b') => self.jump_back(),
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('f') => self.open_list(),
-            KeyCode::Enter => self.zoom_to_selected(),
+            KeyCode::Enter => self.jump(|app| app.zoom_to_selected()),
             KeyCode::Char('c') => self.toggle_gc_skew(),
             _ => {}
         }
+    }
+
+    fn view_state(&self) -> ViewState {
+        ViewState {
+            record: self.current,
+            start: self.start,
+            span: self.span,
+            selected: self.selected,
+        }
+    }
+
+    /// Run a jump (go to, search, zoom to feature, ...) and remember where
+    /// we were, if it actually moved anything.
+    fn jump(&mut self, action: impl FnOnce(&mut Self)) {
+        let before = self.view_state();
+        action(self);
+        if self.view_state() != before {
+            if self.history.len() == HISTORY_LIMIT {
+                self.history.remove(0);
+            }
+            self.history.push(before);
+        }
+    }
+
+    /// Return to the view before the most recent jump.
+    fn jump_back(&mut self) {
+        let Some(state) = self.history.pop() else {
+            self.message = Some("No earlier view to go back to".to_string());
+            return;
+        };
+        if state.record != self.current {
+            // Search matches belong to the record they were found in.
+            self.search = None;
+            self.list_state = TableState::default();
+        }
+        self.current = state.record;
+        self.start = state.start;
+        self.span = state.span;
+        self.clamp();
+        self.selected = state.selected;
+        self.detail_scroll = 0;
+
+        let window = self.window();
+        let more = match self.history.len() {
+            0 => String::new(),
+            n => format!("  ({n} more)"),
+        };
+        self.message = Some(format!(
+            "Back to {}..{}{more}",
+            crate::thousands(window.start + 1),
+            crate::thousands(window.end)
+        ));
     }
 
     /// The search query, if a search is active.
@@ -567,7 +635,7 @@ impl App {
             }
             KeyCode::Enter => {
                 self.list_open = false;
-                self.zoom_to_selected();
+                self.jump(|app| app.zoom_to_selected());
             }
             KeyCode::Char('f') => self.list_open = false,
             KeyCode::Esc if self.search.is_some() => {
@@ -1273,6 +1341,96 @@ mod tests {
         press(&mut app, KeyCode::Char('g'));
         type_text(&mut app, "5");
         assert_eq!(app.window(), 0..10_000);
+    }
+
+    #[test]
+    fn backspace_walks_back_through_jumps() {
+        let mut app = synthetic_app(100_000);
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "70,000");
+        press(&mut app, KeyCode::Char('+'));
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "20,000");
+        assert_eq!(app.window(), 17_499..22_499);
+
+        // Back to where the second `g` started, zoom included.
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.window(), 67_499..72_499);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("Back to 67,500..72,499  (1 more)")
+        );
+
+        press(&mut app, KeyCode::Char('b'));
+        assert_eq!(app.window(), 0..100_000);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.window(), 0..100_000);
+        assert_eq!(
+            app.message.as_deref(),
+            Some("No earlier view to go back to")
+        );
+    }
+
+    #[test]
+    fn pans_and_failed_jumps_are_not_remembered() {
+        let mut app = synthetic_app(100_000);
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "50,000");
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Char('-'));
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "not-a-place");
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.window(), 0..100_000);
+        assert!(app.history.is_empty());
+    }
+
+    #[test]
+    fn back_restores_selection_after_search_and_zoom() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "gyrase");
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.window(), 4900..5000);
+
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "1000..1200");
+        // The off-screen selection was dropped by `g`...
+        assert_eq!(app.selected, None);
+
+        // ...and comes back with the view.
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.window(), 4900..5000);
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.window(), 0..5000);
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.selected, None);
+    }
+
+    #[test]
+    fn back_works_from_the_feature_list() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.window(), 2048..3726);
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Backspace);
+        assert!(app.list_open);
+        assert_eq!(app.window(), 0..5000);
+    }
+
+    #[test]
+    fn history_is_capped() {
+        let mut app = synthetic_app(100_000);
+        for i in 0..60 {
+            press(&mut app, KeyCode::Char('g'));
+            type_text(&mut app, &format!("{}", 1000 + i * 1000));
+        }
+        assert_eq!(app.history.len(), HISTORY_LIMIT);
     }
 
     #[test]
