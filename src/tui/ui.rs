@@ -5,9 +5,9 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout as Split, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row as TableRow, Table, Wrap};
 
-use super::app::{App, Mode, Track};
+use super::app::{App, Mode, SortKey, Track};
 use super::tracks::{density, location_string, spark, tick_spacing};
 use crate::model::{Feature, FeatureKind, Strand, Topology};
 use crate::thousands;
@@ -51,7 +51,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_track(frame, app, forward, Track::Forward, "+");
     draw_sequence(frame, app, sequence);
     draw_track(frame, app, reverse, Track::Reverse, "-");
-    draw_details(frame, app, details);
+    if app.list_open {
+        // With room to spare, keep a few lines of details under the list.
+        if details.height >= 16 {
+            let [list, below] =
+                Split::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .areas(details);
+            draw_feature_list(frame, app, list);
+            draw_details(frame, app, below);
+        } else {
+            draw_feature_list(frame, app, details);
+        }
+    } else {
+        draw_details(frame, app, details);
+    }
     draw_status(frame, app, status);
 
     if app.mode == Mode::Help {
@@ -477,6 +490,110 @@ fn feature_details(feature: &Feature) -> (String, Vec<Line<'static>>) {
     (title, lines)
 }
 
+fn draw_feature_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    let rows = app.list_rows();
+    let cursor = app.list_cursor(&rows);
+    // Border line + header row.
+    app.list_page = area.height.saturating_sub(2) as usize;
+
+    let record = app.record();
+    let shown = &app.layout().shown;
+    let features: Vec<&Feature> = rows.iter().map(|&k| &record.features[shown[k]]).collect();
+
+    let arrow = if app.sort_reverse { "▼" } else { "▲" };
+    let title = match app.search_query() {
+        Some(query) => format!(
+            " {} matches for \"{query}\" · sorted by {} {arrow} ",
+            thousands(rows.len()),
+            app.sort.name()
+        ),
+        None => format!(
+            " Features ({}) · sorted by {} {arrow} ",
+            thousands(rows.len()),
+            app.sort.name()
+        ),
+    };
+
+    let heading = |name: &str, key: Option<SortKey>| {
+        if key == Some(app.sort) {
+            format!("{name} {arrow}")
+        } else {
+            name.to_string()
+        }
+    };
+    // Numbers are right-aligned so their digits line up.
+    let right = |text: String| Cell::from(Line::from(text).alignment(Alignment::Right));
+    let header = TableRow::new([
+        right(heading("start", Some(SortKey::Position))),
+        right(heading("end", None)),
+        right(heading("length", Some(SortKey::Length))),
+        Cell::from("±"),
+        Cell::from(heading("type", Some(SortKey::Type))),
+        Cell::from(heading("name", Some(SortKey::Name))),
+        Cell::from(heading("product", Some(SortKey::Product))),
+    ])
+    .style(Style::default().bold().dim());
+
+    let table_rows = features.iter().map(|f| {
+        let loc = &f.location;
+        let strand = match loc.strand {
+            Strand::Forward => "+",
+            Strand::Reverse => "-",
+            Strand::Unknown => "?",
+        };
+        let start = format!(
+            "{}{}",
+            if loc.partial_start { "<" } else { "" },
+            loc.start() + 1
+        );
+        let end = format!("{}{}", if loc.partial_end { ">" } else { "" }, loc.end());
+        let length: usize = loc.segments.iter().map(|s| s.len()).sum();
+        TableRow::new([
+            right(start),
+            right(end),
+            right(thousands(length)),
+            Cell::from(strand),
+            Cell::from(f.kind.as_key().to_string())
+                .style(Style::default().fg(feature_color(&f.kind))),
+            Cell::from(f.label().unwrap_or("-").to_string()),
+            Cell::from(f.qualifier("product").unwrap_or("").to_string()),
+        ])
+    });
+
+    let coord = record.len().to_string().len() as u16 + 1;
+    let kind = features
+        .iter()
+        .map(|f| f.kind.as_key().len())
+        .max()
+        .unwrap_or(0)
+        .max(6) as u16;
+    let name = features
+        .iter()
+        .filter_map(|f| f.label())
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(6, 16) as u16;
+    let widths = [
+        Constraint::Length(coord.max(7)),
+        Constraint::Length(coord.max(5)),
+        Constraint::Length(8),
+        Constraint::Length(1),
+        Constraint::Length(kind),
+        Constraint::Length(name),
+        Constraint::Fill(1),
+    ];
+
+    let table = Table::new(table_rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::TOP).title(title.bold()))
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .column_spacing(2);
+
+    app.list_state.select(cursor);
+    frame.render_stateful_widget(table, area, &mut app.list_state);
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let line = match &app.mode {
         Mode::GoTo(input) => Line::from(vec![
@@ -489,8 +606,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         _ => match &app.message {
             Some(message) => Line::from(format!(" {message}")).yellow(),
+            None if app.list_open => Line::from(
+                " ↑/↓ move  s sort  S reverse  / search  Enter show in tracks  f/Esc close list",
+            )
+            .dim(),
             None => Line::from(
-                " ←/→ pan  +/- zoom  Tab next feature  / search  g go to  ? help  q quit",
+                " ←/→ pan  +/- zoom  Tab next feature  f feature list  / search  g go to  ? help  q quit",
             )
             .dim(),
         },
@@ -511,6 +632,10 @@ const HELP: &[(&str, &str)] = &[
     ("g", "go to position, START..END, or locus tag"),
     ("[ ]", "previous / next record"),
     ("Esc", "clear selection and search"),
+    ("f", "open / close the feature list"),
+    ("  ↑ ↓ PgUp PgDn", "  move through the list"),
+    ("  s  S", "  change sort column / reverse order"),
+    ("  Enter", "  close the list, keep the selection"),
     ("q", "quit"),
 ];
 
@@ -619,6 +744,40 @@ mod tests {
         let screen = render(&mut app, 120, 20);
         assert!(!screen.contains("R…"), "{screen}");
         assert!(screen.contains("RPD_0001"), "{screen}");
+    }
+
+    #[test]
+    fn renders_feature_list() {
+        let mut app = fixture_app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let screen = render(&mut app, 120, 40);
+        assert!(
+            screen.contains("Features (4) · sorted by position ▲"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("start ▲    end    length  ±  type"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("   2329   3447     1,119  +  CDS     RPD_0002  DNA polymerase III"),
+            "{screen}"
+        );
+        assert!(screen.contains("   4985  >5000        16  +"), "{screen}");
+        // The highlighted row is the selected feature.
+        assert_eq!(app.list_state.selected(), Some(1));
+        // Tall enough to keep the details panel under the list.
+        assert!(
+            screen.contains("CDS  2329..3447  1,119 bp  strand +"),
+            "{screen}"
+        );
+        assert!(screen.contains("s sort"), "{screen}");
+
+        // Short terminal: the list takes the whole panel; still no panic.
+        let screen = render(&mut app, 120, 20);
+        assert!(screen.contains("RPD_0002"), "{screen}");
+        render(&mut app, 10, 4);
     }
 
     #[test]

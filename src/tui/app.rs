@@ -4,6 +4,7 @@
 use std::ops::Range;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::widgets::TableState;
 
 use super::tracks::pack_lanes;
 use crate::model::{Feature, Record, Strand};
@@ -114,6 +115,38 @@ impl Layout {
     }
 }
 
+/// Column the feature list is sorted by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Position,
+    Length,
+    Type,
+    Name,
+    Product,
+}
+
+impl SortKey {
+    fn next(self) -> Self {
+        match self {
+            SortKey::Position => SortKey::Length,
+            SortKey::Length => SortKey::Type,
+            SortKey::Type => SortKey::Name,
+            SortKey::Name => SortKey::Product,
+            SortKey::Product => SortKey::Position,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SortKey::Position => "position",
+            SortKey::Length => "length",
+            SortKey::Type => "type",
+            SortKey::Name => "name",
+            SortKey::Product => "product",
+        }
+    }
+}
+
 struct Search {
     query: String,
     /// Positions in `shown`.
@@ -139,6 +172,14 @@ pub struct App {
     pub detail_scroll: u16,
     pub quit: bool,
     initial_region: Option<Range<usize>>,
+    /// Whether the feature list replaces the details panel.
+    pub list_open: bool,
+    /// Scroll position of the list; its selection mirrors `selected`.
+    pub list_state: TableState,
+    /// Rows the list shows at once, set by the drawing code.
+    pub list_page: usize,
+    pub sort: SortKey,
+    pub sort_reverse: bool,
 }
 
 impl App {
@@ -164,6 +205,11 @@ impl App {
             detail_scroll: 0,
             quit: false,
             initial_region: region,
+            list_open: false,
+            list_state: TableState::default(),
+            list_page: 10,
+            sort: SortKey::Position,
+            sort_reverse: false,
         };
         app.reset_view();
         app
@@ -227,6 +273,7 @@ impl App {
         self.selected = None;
         self.search = None;
         self.detail_scroll = 0;
+        self.list_state = TableState::default();
     }
 
     fn pan(&mut self, fraction: f64) {
@@ -257,6 +304,7 @@ impl App {
             return;
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::Normal if self.list_open => self.handle_list(key),
             Mode::Normal => self.handle_normal(key),
             Mode::Help => {}
             Mode::GoTo(input) => {
@@ -310,7 +358,134 @@ impl App {
             KeyCode::Char(']') => self.switch_record(1),
             KeyCode::Char('[') => self.switch_record(-1),
             KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Char('f') => self.open_list(),
             _ => {}
+        }
+    }
+
+    /// The search query, if a search is active.
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.as_ref().map(|s| s.query.as_str())
+    }
+
+    /// Rows of the feature list, as positions in `layout().shown`: the
+    /// search matches if a search is active, otherwise every shown feature,
+    /// in the current sort order.
+    pub fn list_rows(&self) -> Vec<usize> {
+        let mut rows: Vec<usize> = match &self.search {
+            Some(search) => search.matches.clone(),
+            None => (0..self.layout().shown.len()).collect(),
+        };
+        let record = self.record();
+        let shown = &self.layout().shown;
+        let feature = |k: usize| &record.features[shown[k]];
+        let text = |k: usize, key: &str| {
+            let f = feature(k);
+            match key {
+                "label" => f.label(),
+                _ => f.qualifier(key),
+            }
+            .unwrap_or("")
+            .to_lowercase()
+        };
+
+        // `shown` is already in position order, so a stable sort keeps
+        // position as the tie-breaker for every other key.
+        match self.sort {
+            SortKey::Position => {}
+            SortKey::Length => rows.sort_by_key(|&k| {
+                let loc = &feature(k).location;
+                std::cmp::Reverse(loc.end() - loc.start())
+            }),
+            SortKey::Type => {
+                rows.sort_by(|&a, &b| feature(a).kind.as_key().cmp(feature(b).kind.as_key()))
+            }
+            SortKey::Name => rows.sort_by_cached_key(|&k| text(k, "label")),
+            // Features without a product go last.
+            SortKey::Product => rows.sort_by_cached_key(|&k| {
+                let product = text(k, "product");
+                (product.is_empty(), product)
+            }),
+        }
+        if self.sort_reverse {
+            rows.reverse();
+        }
+        rows
+    }
+
+    /// Row of the selected feature in `rows`, if it is listed.
+    pub fn list_cursor(&self, rows: &[usize]) -> Option<usize> {
+        self.selected
+            .and_then(|k| rows.iter().position(|&r| r == k))
+    }
+
+    fn open_list(&mut self) {
+        self.list_open = true;
+        let rows = self.list_rows();
+        if self.list_cursor(&rows).is_none() {
+            self.select_first_row(&rows);
+        }
+    }
+
+    /// Select the first listed feature in view, or the first row when
+    /// sorted by anything other than position.
+    fn select_first_row(&mut self, rows: &[usize]) {
+        let record = self.record();
+        let shown = &self.layout().shown;
+        let in_view = rows.iter().position(|&k| {
+            let loc = &record.features[shown[k]].location;
+            loc.end() > self.start
+        });
+        let row = match (self.sort, self.sort_reverse) {
+            (SortKey::Position, false) => in_view.unwrap_or(0),
+            _ => 0,
+        };
+        if let Some(&k) = rows.get(row) {
+            self.select(k);
+        }
+    }
+
+    /// Move the list cursor by `delta` rows, clamped to the list.
+    fn move_cursor(&mut self, delta: isize) {
+        let rows = self.list_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let target = match self.list_cursor(&rows) {
+            Some(row) => (row as isize + delta).clamp(0, rows.len() as isize - 1) as usize,
+            None => 0,
+        };
+        self.select(rows[target]);
+    }
+
+    fn handle_list(&mut self, key: KeyEvent) {
+        self.message = None;
+        let page = self.list_page.max(1) as isize;
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => self.move_cursor(1),
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => self.move_cursor(-1),
+            KeyCode::PageDown => self.move_cursor(page),
+            KeyCode::PageUp => self.move_cursor(-page),
+            KeyCode::Home => self.move_cursor(isize::MIN / 2),
+            KeyCode::End => self.move_cursor(isize::MAX / 2),
+            KeyCode::Char('s') => {
+                self.sort = self.sort.next();
+                self.sort_reverse = false;
+                self.select_first_row(&self.list_rows());
+            }
+            KeyCode::Char('S') => {
+                self.sort_reverse = !self.sort_reverse;
+                self.select_first_row(&self.list_rows());
+            }
+            KeyCode::Enter | KeyCode::Char('f') => self.list_open = false,
+            KeyCode::Esc if self.search.is_some() => {
+                self.search = None;
+                self.list_state = TableState::default();
+            }
+            KeyCode::Esc => self.list_open = false,
+            // Everything else (pan, zoom, search, go to, help, quit) works
+            // as usual while the list is open.
+            _ => self.handle_normal(key),
         }
     }
 
@@ -647,6 +822,99 @@ mod tests {
         press(&mut app, KeyCode::Char('1'));
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.window(), 0..5000);
+    }
+
+    fn listed_tags(app: &App) -> Vec<&str> {
+        app.list_rows()
+            .into_iter()
+            .filter_map(|k| app.record().features[app.layout().shown[k]].qualifier("locus_tag"))
+            .collect()
+    }
+
+    #[test]
+    fn list_opens_on_first_feature_in_view() {
+        let mut app = fixture_app(Some(2000..3000));
+        press(&mut app, KeyCode::Char('f'));
+        assert!(app.list_open);
+        // RPD_0001 (649..2067) still reaches into the view.
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(selected_tag(&app), Some("RPD_0002"));
+        press(&mut app, KeyCode::End);
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+        press(&mut app, KeyCode::Home);
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+    }
+
+    #[test]
+    fn list_sorts_and_reverses() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.sort, SortKey::Length);
+        // 1419, 1137, 1119, 16 bp
+        assert_eq!(
+            listed_tags(&app),
+            ["RPD_0001", "RPD_0003", "RPD_0002", "RPD_0004"]
+        );
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+
+        press(&mut app, KeyCode::Char('S'));
+        assert_eq!(
+            listed_tags(&app),
+            ["RPD_0004", "RPD_0002", "RPD_0003", "RPD_0001"]
+        );
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('s'));
+        }
+        assert_eq!(app.sort, SortKey::Product);
+        // chromosomal..., DNA gyrase, DNA polymerase, DNA replication
+        assert_eq!(
+            listed_tags(&app),
+            ["RPD_0001", "RPD_0004", "RPD_0002", "RPD_0003"]
+        );
+    }
+
+    #[test]
+    fn list_shows_search_matches_and_esc_steps_back() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "dna ");
+        assert!(app.list_open);
+        assert_eq!(
+            listed_tags(&app),
+            ["RPD_0001", "RPD_0002", "RPD_0003", "RPD_0004"]
+        );
+
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "gyrase");
+        assert_eq!(listed_tags(&app), ["RPD_0004"]);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.list_open);
+        assert_eq!(listed_tags(&app).len(), 4);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.list_open);
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+    }
+
+    #[test]
+    fn enter_closes_list_and_keeps_selection() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.list_open);
+        assert_eq!(selected_tag(&app), Some("RPD_0002"));
+        // Keys not used by the list still reach the viewer.
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('0'));
         assert_eq!(app.window(), 0..5000);
     }
 
