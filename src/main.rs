@@ -101,16 +101,18 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let records = parser::parse_file(&cli.file)?;
 
-    if cli.tsv {
-        match write_tsv(&records, &cli) {
-            // The reader went away (e.g. `| head`): stop quietly.
-            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
-            result => result?,
-        }
+    let mut out = BufWriter::new(io::stdout().lock());
+    let result = if cli.tsv {
+        write_tsv(&mut out, &records, &cli)
     } else {
-        view(&records, &cli);
+        view(&mut out, &records, &cli)
+    };
+
+    match result.and_then(|()| out.flush()) {
+        // The reader went away (e.g. `| head`): stop quietly.
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => Ok(result?),
     }
-    Ok(())
 }
 
 const TSV_COLUMNS: [&str; 9] = [
@@ -119,8 +121,7 @@ const TSV_COLUMNS: [&str; 9] = [
 
 /// Write the feature table for every record as TSV. Coordinates are 1-based
 /// inclusive, as in GenBank; `partial` is `<`, `>`, `<>` or empty.
-fn write_tsv(records: &[Record], cli: &Cli) -> io::Result<()> {
-    let mut out = BufWriter::new(io::stdout().lock());
+fn write_tsv(out: &mut impl Write, records: &[Record], cli: &Cli) -> io::Result<()> {
     writeln!(out, "{}", TSV_COLUMNS.join("\t"))?;
 
     let mut remaining = cli.row_limit();
@@ -134,13 +135,13 @@ fn write_tsv(records: &[Record], cli: &Cli) -> io::Result<()> {
 
         for feature in rows {
             if remaining == 0 {
-                return out.flush();
+                return Ok(());
             }
             remaining -= 1;
             writeln!(out, "{}", tsv_row(record, feature).join("\t"))?;
         }
     }
-    out.flush()
+    Ok(())
 }
 
 fn tsv_row(record: &Record, feature: &Feature) -> [String; 9] {
@@ -177,16 +178,17 @@ fn tsv_field(value: &str) -> String {
 }
 
 /// Print a text summary of each record.
-fn view(records: &[Record], cli: &Cli) {
+fn view(out: &mut impl Write, records: &[Record], cli: &Cli) -> io::Result<()> {
     for (i, record) in records.iter().enumerate() {
         if i > 0 {
-            println!();
+            writeln!(out)?;
         }
-        print_record(record, cli);
+        print_record(out, record, cli)?;
     }
+    Ok(())
 }
 
-fn print_record(record: &Record, cli: &Cli) {
+fn print_record(out: &mut impl Write, record: &Record, cli: &Cli) -> io::Result<()> {
     let mut header = format!("{}  {} bp", record.name, thousands(record.len()));
     if let Some(molecule) = molecule_name(record.molecule) {
         header.push_str("  ");
@@ -198,10 +200,10 @@ fn print_record(record: &Record, cli: &Cli) {
             Topology::Circular => "  circular",
         });
     }
-    println!("{header}");
+    writeln!(out, "{header}")?;
 
     if let Some(definition) = &record.definition {
-        println!("  {definition}");
+        writeln!(out, "  {definition}")?;
     }
 
     let mut details = Vec::new();
@@ -218,46 +220,49 @@ fn print_record(record: &Record, cli: &Cli) {
         details.push(format!("Date: {date}"));
     }
     if !details.is_empty() {
-        println!("  {}", details.join("   "));
+        writeln!(out, "  {}", details.join("   "))?;
     }
 
     if let Some(organism) = &record.organism {
-        println!("  Organism: {}", organism.name);
+        writeln!(out, "  Organism: {}", organism.name)?;
         if !organism.lineage.is_empty() {
-            println!("  Lineage:  {}", organism.lineage.join(" > "));
+            writeln!(out, "  Lineage:  {}", organism.lineage.join(" > "))?;
         }
     }
 
     let window = cli.window(record);
     if let (Some(region), Some(window)) = (&cli.region, &window) {
         if window.is_empty() {
-            println!(
+            writeln!(
+                out,
                 "  Region {}..{} is beyond the end of this record",
                 thousands(region.start + 1),
                 thousands(region.end)
-            );
-            return;
+            )?;
+            return Ok(());
         }
-        println!(
+        writeln!(
+            out,
             "  Region:   {}..{} ({} bp)",
             thousands(window.start + 1),
             thousands(window.end),
             thousands(window.len())
-        );
+        )?;
     }
 
     let shown = window.clone().unwrap_or(0..record.len());
     if cli.preview > 0 && !shown.is_empty() {
         let end = shown.end.min(shown.start + cli.preview);
         let more = if end < shown.end { "..." } else { "" };
-        println!(
+        writeln!(
+            out,
             "  Sequence: {}{more}",
             String::from_utf8_lossy(&record.sequence[shown.start..end])
-        );
+        )?;
     }
 
     if record.features.is_empty() {
-        return;
+        return Ok(());
     }
 
     let features: Vec<&Feature> = record
@@ -266,16 +271,20 @@ fn print_record(record: &Record, cli: &Cli) {
         .filter(|f| window.as_ref().is_none_or(|w| f.location.overlaps(w)))
         .collect();
 
-    println!();
-    print_feature_counts(&features, window.is_some());
-    println!();
-    print_feature_table(record, &features, cli);
+    writeln!(out)?;
+    print_feature_counts(out, &features, window.is_some())?;
+    writeln!(out)?;
+    print_feature_table(out, record, &features, cli)
 }
 
-fn print_feature_counts(features: &[&Feature], in_region: bool) {
+fn print_feature_counts(
+    out: &mut impl Write,
+    features: &[&Feature],
+    in_region: bool,
+) -> io::Result<()> {
     if features.is_empty() {
-        println!("  No features in this region");
-        return;
+        writeln!(out, "  No features in this region")?;
+        return Ok(());
     }
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -288,24 +297,30 @@ fn print_feature_counts(features: &[&Feature], in_region: bool) {
     counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
     let scope = if in_region { " in region" } else { "" };
-    println!("  Features ({}{scope}):", thousands(features.len()));
+    writeln!(out, "  Features ({}{scope}):", thousands(features.len()))?;
     let width = counts.iter().map(|(kind, _)| kind.len()).max().unwrap_or(0);
     for (kind, count) in counts {
-        println!("    {kind:<width$}  {:>7}", thousands(count));
+        writeln!(out, "    {kind:<width$}  {:>7}", thousands(count))?;
     }
+    Ok(())
 }
 
-fn print_feature_table(record: &Record, features: &[&Feature], cli: &Cli) {
+fn print_feature_table(
+    out: &mut impl Write,
+    record: &Record,
+    features: &[&Feature],
+    cli: &Cli,
+) -> io::Result<()> {
     let rows: Vec<&Feature> = features.iter().copied().filter(|f| cli.wants(f)).collect();
     if rows.is_empty() {
         if !cli.types.is_empty() && !features.is_empty() {
-            println!("  No features of type {}", cli.types.join(", "));
+            writeln!(out, "  No features of type {}", cli.types.join(", "))?;
         }
-        return;
+        return Ok(());
     }
     let limit = cli.row_limit();
     if limit == 0 {
-        return;
+        return Ok(());
     }
 
     // Wide enough for "<1234567" on either side of "..".
@@ -317,7 +332,8 @@ fn print_feature_table(record: &Record, features: &[&Feature], cli: &Cli) {
         .unwrap_or(0)
         .max("type".len());
 
-    println!(
+    writeln!(
+        out,
         "  {:>w$}  {:<w$}  ±  {:<k$}  {:<10}  product",
         "start",
         "end",
@@ -325,7 +341,7 @@ fn print_feature_table(record: &Record, features: &[&Feature], cli: &Cli) {
         "label",
         w = coord_width,
         k = kind_width,
-    );
+    )?;
     for feature in rows.iter().take(limit) {
         let loc = &feature.location;
         // Display in GenBank's 1-based inclusive coordinates.
@@ -336,21 +352,24 @@ fn print_feature_table(record: &Record, features: &[&Feature], cli: &Cli) {
             Strand::Reverse => '-',
             Strand::Unknown => '?',
         };
-        println!(
+        writeln!(
+            out,
             "  {start:>w$}  {end:<w$}  {strand}  {:<k$}  {:<10}  {}",
             feature.kind.as_key(),
             feature.label().unwrap_or("-"),
             feature.qualifier("product").unwrap_or(""),
             w = coord_width,
             k = kind_width,
-        );
+        )?;
     }
     if rows.len() > limit {
-        println!(
+        writeln!(
+            out,
             "  ... and {} more (use --all or --rows N to see them)",
             thousands(rows.len() - limit)
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Features that carry a gene product: CDSs and RNAs. `gene` features are
