@@ -14,6 +14,8 @@ use crate::settings::Settings;
 
 /// Width assumed until the first frame reports the real one.
 const DEFAULT_COLS: usize = 100;
+/// Widest view `g` leaves you at after going to a single position.
+const GO_TO_SPAN: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -674,6 +676,10 @@ impl App {
             if pos == 0 || pos > len {
                 self.message = Some(format!("Position must be between 1 and {len}"));
             } else {
+                // From a wide view the position may be impossible to centre
+                // on (the window would run off the end), so zoom in first.
+                self.span = self.span.min(GO_TO_SPAN);
+                self.clamp();
                 self.center_on(pos - 1);
                 self.follow_view();
             }
@@ -807,6 +813,28 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/CP000283_5k.gb");
         let records = crate::parser::parse_file(&path).unwrap();
         let mut app = App::new(records, &|f| f.kind == FeatureKind::Cds, region);
+        app.set_cols(100);
+        app
+    }
+
+    /// A featureless record of `len` bases, for tests that need more room
+    /// than the 5 kb fixture.
+    fn synthetic_app(len: usize) -> App {
+        use crate::model::{MoleculeType, Topology};
+        let record = Record {
+            name: "synthetic".to_string(),
+            accession: None,
+            version: None,
+            definition: None,
+            molecule: MoleculeType::Dna,
+            topology: Topology::Circular,
+            division: None,
+            date: None,
+            organism: None,
+            features: Vec::new(),
+            sequence: b"ACGT".repeat(len / 4),
+        };
+        let mut app = App::new(vec![record], &|_| true, None);
         app.set_cols(100);
         app
     }
@@ -1206,6 +1234,45 @@ mod tests {
         assert_eq!(selected_tag(&app), Some("RPD_0003"));
         press(&mut app, KeyCode::Home);
         assert_eq!(selected_tag(&app), Some("RPD_0003"));
+    }
+
+    #[test]
+    fn go_to_from_whole_record_zooms_in_and_centres() {
+        let mut app = synthetic_app(100_000);
+        assert_eq!(app.window(), 0..100_000);
+
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "70,000");
+        // 10 kb centred on base 70,000 (69,999 0-based).
+        assert_eq!(app.window(), 64_999..74_999);
+
+        // + keeps zooming in on the same spot.
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.window(), 67_499..72_499);
+        press(&mut app, KeyCode::Char('+'));
+        let w = app.window();
+        assert!(w.contains(&69_999) && w.len() == 2_500, "{w:?}");
+    }
+
+    #[test]
+    fn go_to_keeps_a_closer_zoom() {
+        let mut app = synthetic_app(100_000);
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "50,001..51,000");
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "20,000");
+        assert_eq!(app.window(), 19_499..20_499);
+    }
+
+    #[test]
+    fn go_to_near_the_ends_still_shows_the_position() {
+        let mut app = synthetic_app(100_000);
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "99,990");
+        assert_eq!(app.window(), 90_000..100_000);
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "5");
+        assert_eq!(app.window(), 0..10_000);
     }
 
     #[test]
