@@ -607,7 +607,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         _ => match &app.message {
             Some(message) => Line::from(format!(" {message}")).yellow(),
             None if app.list_open => Line::from(
-                " ↑/↓ move  s sort  S reverse  / search  Enter show in tracks  f/Esc close list",
+                " ↑/↓ move  s sort  S reverse  / search  Enter go to feature  f/Esc close list",
             )
             .dim(),
             None => Line::from(
@@ -626,6 +626,7 @@ const HELP: &[(&str, &str)] = &[
     ("+ -", "zoom in / out"),
     ("0", "zoom out to the whole record"),
     ("Tab Shift-Tab", "select next / previous feature"),
+    ("Enter", "zoom to the selected feature"),
     ("↑ ↓ / k j", "scroll the details panel"),
     ("/", "search locus tag, gene, product, protein ID"),
     ("n N", "next / previous match"),
@@ -635,7 +636,7 @@ const HELP: &[(&str, &str)] = &[
     ("f", "open / close the feature list"),
     ("  ↑ ↓ PgUp PgDn", "  move through the list"),
     ("  s  S", "  change sort column / reverse order"),
-    ("  Enter", "  close the list, keep the selection"),
+    ("  Enter", "  close the list and zoom to the feature"),
     ("q", "quit"),
 ];
 

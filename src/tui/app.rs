@@ -359,6 +359,7 @@ impl App {
             KeyCode::Char('[') => self.switch_record(-1),
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('f') => self.open_list(),
+            KeyCode::Enter => self.zoom_to_selected(),
             _ => {}
         }
     }
@@ -477,7 +478,11 @@ impl App {
                 self.sort_reverse = !self.sort_reverse;
                 self.select_first_row(&self.list_rows());
             }
-            KeyCode::Enter | KeyCode::Char('f') => self.list_open = false,
+            KeyCode::Enter => {
+                self.list_open = false;
+                self.zoom_to_selected();
+            }
+            KeyCode::Char('f') => self.list_open = false,
             KeyCode::Esc if self.search.is_some() => {
                 self.search = None;
                 self.list_state = TableState::default();
@@ -487,6 +492,20 @@ impl App {
             // as usual while the list is open.
             _ => self.handle_normal(key),
         }
+    }
+
+    /// Zoom so the selected feature fills about two thirds of the view,
+    /// or to 1 bp per column if it is smaller than that.
+    fn zoom_to_selected(&mut self) {
+        let Some(feature) = self.selected_feature() else {
+            self.message = Some("Nothing selected; press Tab or f to pick a feature".to_string());
+            return;
+        };
+        let (start, end) = (feature.location.start(), feature.location.end());
+        let extent = end - start;
+        self.span = extent + extent / 2;
+        self.clamp();
+        self.center_on(start + extent / 2);
     }
 
     fn select(&mut self, k: usize) {
@@ -905,17 +924,39 @@ mod tests {
     }
 
     #[test]
-    fn enter_closes_list_and_keeps_selection() {
+    fn enter_closes_list_and_zooms_to_feature() {
         let mut app = fixture_app(None);
         press(&mut app, KeyCode::Char('f'));
         press(&mut app, KeyCode::Down);
+        // Browsing only scrolls; the whole record is still in view.
+        assert_eq!(app.window(), 0..5000);
         press(&mut app, KeyCode::Enter);
         assert!(!app.list_open);
         assert_eq!(selected_tag(&app), Some("RPD_0002"));
+        // RPD_0002 is 2329..3447 (1,119 bp): view is 1.5x that, centred.
+        assert_eq!(app.window(), 2048..3726);
         // Keys not used by the list still reach the viewer.
         press(&mut app, KeyCode::Char('f'));
         press(&mut app, KeyCode::Char('0'));
         assert_eq!(app.window(), 0..5000);
+    }
+
+    #[test]
+    fn enter_zooms_small_features_to_base_level() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "RPD_0004");
+        press(&mut app, KeyCode::Enter);
+        // 16 bp feature at the end of the record: 1 bp per column, clamped.
+        assert_eq!(app.window(), 4900..5000);
+    }
+
+    #[test]
+    fn enter_without_selection_explains() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.window(), 0..5000);
+        assert!(app.message.as_deref().unwrap().contains("Nothing selected"));
     }
 
     #[test]
