@@ -116,7 +116,15 @@ fn main() -> Result<()> {
 }
 
 const TSV_COLUMNS: [&str; 9] = [
-    "record", "type", "start", "end", "strand", "partial", "locus_tag", "gene", "product",
+    "record",
+    "type",
+    "start",
+    "end",
+    "strand",
+    "partial",
+    "locus_tag",
+    "gene",
+    "product",
 ];
 
 /// Write the feature table for every record as TSV. Coordinates are 1-based
@@ -345,7 +353,11 @@ fn print_feature_table(
     for feature in rows.iter().take(limit) {
         let loc = &feature.location;
         // Display in GenBank's 1-based inclusive coordinates.
-        let start = format!("{}{}", if loc.partial_start { "<" } else { "" }, loc.start() + 1);
+        let start = format!(
+            "{}{}",
+            if loc.partial_start { "<" } else { "" },
+            loc.start() + 1
+        );
         let end = format!("{}{}", if loc.partial_end { ">" } else { "" }, loc.end());
         let strand = match loc.strand {
             Strand::Forward => '+',
@@ -450,7 +462,14 @@ mod tests {
         assert_eq!(
             first,
             [
-                "CP000283", "CDS", "649", "2067", "+", "", "RPD_0001", "",
+                "CP000283",
+                "CDS",
+                "649",
+                "2067",
+                "+",
+                "",
+                "RPD_0001",
+                "",
                 "chromosomal replication initiator protein DnaA",
             ]
         );

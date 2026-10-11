@@ -120,7 +120,11 @@ fn convert_location(location: &GbLocation) -> Location {
 /// Appends segments in biological (5'→3') order. `complement(...)` reverses
 /// the order of its children as well as their strand.
 fn flatten(location: &GbLocation, reverse: bool, out: &mut Vec<Segment>) {
-    let strand = if reverse { Strand::Reverse } else { Strand::Forward };
+    let strand = if reverse {
+        Strand::Reverse
+    } else {
+        Strand::Forward
+    };
     match location {
         GbLocation::Range((start, Before(before)), (end, After(after))) => out.push(Segment {
             range: to_usize(*start)..to_usize(*end),
@@ -174,8 +178,8 @@ pub fn parse_fasta(path: &Path) -> Result<Vec<Record>> {
     reader
         .records()
         .map(|result| {
-            let record = result
-                .with_context(|| format!("failed to parse FASTA file {}", path.display()))?;
+            let record =
+                result.with_context(|| format!("failed to parse FASTA file {}", path.display()))?;
             Ok(convert_fasta_record(&record))
         })
         .collect()
@@ -270,8 +274,14 @@ mod tests {
 
         let organism = record.organism.as_ref().unwrap();
         assert_eq!(organism.name, "Rhodopseudomonas palustris BisB5");
-        assert_eq!(organism.lineage.first().map(String::as_str), Some("Bacteria"));
-        assert_eq!(organism.lineage.last().map(String::as_str), Some("Rhodopseudomonas"));
+        assert_eq!(
+            organism.lineage.first().map(String::as_str),
+            Some("Bacteria")
+        );
+        assert_eq!(
+            organism.lineage.last().map(String::as_str),
+            Some("Rhodopseudomonas")
+        );
         assert_eq!(organism.lineage.len(), 7);
 
         assert_eq!(record.features.len(), 9);
@@ -296,7 +306,9 @@ mod tests {
     }
 
     fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(name)
     }
 
     #[test]
