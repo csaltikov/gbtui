@@ -454,12 +454,63 @@ impl App {
             .and_then(|k| rows.iter().position(|&r| r == k))
     }
 
+    /// Whether feature `k` (a position in `shown`) overlaps the view.
+    fn in_view(&self, k: usize) -> bool {
+        self.record().features[self.layout().shown[k]]
+            .location
+            .overlaps(&self.window())
+    }
+
+    /// The selection, but only while it is on screen. A selection left
+    /// behind after panning or `g` shouldn't decide where Tab or the list
+    /// start.
+    fn visible_selection(&self) -> Option<usize> {
+        self.selected.filter(|&k| self.in_view(k))
+    }
+
     fn open_list(&mut self) {
         self.list_open = true;
-        let rows = self.list_rows();
-        if self.list_cursor(&rows).is_none() {
-            self.select_first_row(&rows);
+        self.follow_view();
+    }
+
+    /// Keep the selection in step with the view after it moves. A selection
+    /// still on screen stays. Otherwise, with the list open, the cursor moves
+    /// to the first listed feature in view (or the next one after it); with
+    /// the list closed, the selection is cleared. The view itself never moves.
+    fn follow_view(&mut self) {
+        let rows = if self.list_open {
+            self.list_rows()
+        } else {
+            Vec::new()
+        };
+        let keep = self
+            .visible_selection()
+            .filter(|k| !self.list_open || rows.contains(k));
+        if keep.is_some() {
+            return;
         }
+        if !self.list_open {
+            self.selected = None;
+            return;
+        }
+
+        // Rows hold positions in `shown`, which is in start order, so the
+        // smallest one starting after the view is the next feature along.
+        let record = self.record();
+        let shown = &self.layout().shown;
+        let next_along = rows
+            .iter()
+            .copied()
+            .filter(|&k| record.features[shown[k]].location.start() >= self.start)
+            .min();
+        let pick = rows
+            .iter()
+            .copied()
+            .find(|&k| self.in_view(k))
+            .or(next_along)
+            .or_else(|| rows.iter().copied().max());
+        self.selected = pick;
+        self.detail_scroll = 0;
     }
 
     /// Select the first listed feature in view, or the first row when
@@ -523,8 +574,13 @@ impl App {
             }
             KeyCode::Esc => self.list_open = false,
             // Everything else (pan, zoom, search, go to, help, quit) works
-            // as usual while the list is open.
-            _ => self.handle_normal(key),
+            // as usual while the list is open, and the list follows the view.
+            _ => {
+                self.handle_normal(key);
+                if self.list_open {
+                    self.follow_view();
+                }
+            }
         }
     }
 
@@ -560,7 +616,7 @@ impl App {
 
     fn next_feature(&mut self) {
         let shown = &self.layout().shown;
-        let next = match self.selected {
+        let next = match self.visible_selection() {
             Some(k) if k + 1 < shown.len() => Some(k + 1),
             Some(_) => None,
             None => {
@@ -577,7 +633,7 @@ impl App {
     }
 
     fn prev_feature(&mut self) {
-        let prev = match self.selected {
+        let prev = match self.visible_selection() {
             Some(k) => k.checked_sub(1),
             None => {
                 let record = self.record();
@@ -619,6 +675,7 @@ impl App {
                 self.message = Some(format!("Position must be between 1 and {len}"));
             } else {
                 self.center_on(pos - 1);
+                self.follow_view();
             }
             return;
         }
@@ -628,6 +685,7 @@ impl App {
                 self.message = Some(format!("Region starts past the end ({len} bp)"));
             } else {
                 self.set_view(region.start..region.end.min(len));
+                self.follow_view();
             }
             return;
         }
@@ -1022,6 +1080,132 @@ mod tests {
         press(&mut app, KeyCode::Char('c'));
         assert!(!app.settings.gc_skew);
         assert_eq!(app.message.as_deref(), Some("GC skew track off"));
+    }
+
+    #[test]
+    fn list_opens_in_the_current_view_after_go_to() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+
+        // Jump away: the old selection is now off screen.
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "4900..5000");
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+        assert_eq!(app.window(), 4899..5000);
+    }
+
+    #[test]
+    fn list_opens_in_view_whatever_the_sort() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('f'));
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.sort, SortKey::Length);
+        press(&mut app, KeyCode::Char('f'));
+
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "3000..3100");
+        press(&mut app, KeyCode::Char('f'));
+        // Only RPD_0002 (2329..3447) is in view; the longest feature isn't.
+        // It's selected where it is, without zooming out to fit it.
+        assert_eq!(selected_tag(&app), Some("RPD_0002"));
+        assert_eq!(app.window(), 2999..3100);
+    }
+
+    #[test]
+    fn list_keeps_a_visible_selection() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(selected_tag(&app), Some("RPD_0002"));
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(selected_tag(&app), Some("RPD_0002"));
+    }
+
+    #[test]
+    fn tab_starts_from_the_view_after_go_to() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "3600..3700");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(selected_tag(&app), Some("RPD_0003"));
+
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "4900..5000");
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(selected_tag(&app), Some("RPD_0004"));
+    }
+
+    #[test]
+    fn go_to_with_list_open_moves_the_list_to_the_new_window() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "3000..3100");
+        assert!(app.list_open);
+        assert_eq!(app.window(), 2999..3100);
+        assert_eq!(selected_tag(&app), Some("RPD_0002"));
+
+        // A gap between genes: the cursor goes to the next feature along,
+        // and the view stays where `g` put it.
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "3450..3550");
+        assert_eq!(app.window(), 3449..3550);
+        assert_eq!(selected_tag(&app), Some("RPD_0003"));
+
+        // By name still selects that feature.
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "RPD_0001");
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+        assert!(app.list_open);
+    }
+
+    #[test]
+    fn list_follows_panning() {
+        let mut app = fixture_app(Some(0..1000));
+        press(&mut app, KeyCode::Char('f'));
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+        // (Home/End move within the list, so pan with the arrow keys.)
+        for _ in 0..25 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.window(), 2500..3500);
+        assert_eq!(selected_tag(&app), Some("RPD_0002"));
+        for _ in 0..15 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.window(), 4000..5000);
+        // RPD_0003 (3622..4758) is the first feature reaching into view.
+        assert_eq!(selected_tag(&app), Some("RPD_0003"));
+    }
+
+    #[test]
+    fn go_to_with_list_closed_drops_an_off_screen_selection() {
+        let mut app = fixture_app(None);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+
+        // Still on screen: kept.
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "1000..1500");
+        assert_eq!(selected_tag(&app), Some("RPD_0001"));
+
+        // Gone: cleared, so the details panel shows the record again.
+        press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "3000..3100");
+        assert_eq!(app.selected, None);
+
+        // Panning with the list closed keeps the selection.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(selected_tag(&app), Some("RPD_0003"));
+        press(&mut app, KeyCode::Home);
+        assert_eq!(selected_tag(&app), Some("RPD_0003"));
     }
 
     #[test]
