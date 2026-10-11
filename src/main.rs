@@ -1,12 +1,13 @@
 mod model;
 mod parser;
+mod tui;
 
 use std::collections::HashMap;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::ops::Range;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use model::{Feature, FeatureKind, MoleculeType, Record, Strand, Topology};
@@ -39,8 +40,12 @@ struct Cli {
     preview: usize,
 
     /// Print only the feature table, as tab-separated values with a header row
-    #[arg(long)]
+    #[arg(long, conflicts_with = "interactive")]
     tsv: bool,
+
+    /// Open the interactive viewer (starts at --region, shows --type features)
+    #[arg(short, long)]
+    interactive: bool,
 }
 
 impl Cli {
@@ -100,6 +105,17 @@ fn parse_region(s: &str) -> Result<Range<usize>, String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let records = parser::parse_file(&cli.file)?;
+
+    if cli.interactive {
+        if !io::stdout().is_terminal() {
+            bail!("--interactive needs a terminal; it can't write to a pipe or file");
+        }
+        if records.is_empty() {
+            bail!("no records found in {}", cli.file.display());
+        }
+        let app = tui::App::new(records, &|f| cli.wants(f), cli.region.clone());
+        return tui::run(app);
+    }
 
     let mut out = BufWriter::new(io::stdout().lock());
     let result = if cli.tsv {
@@ -481,6 +497,12 @@ mod tests {
     #[test]
     fn tsv_fields_have_no_tabs_or_newlines() {
         assert_eq!(tsv_field("a\tb\nc"), "a b c");
+    }
+
+    #[test]
+    fn interactive_and_tsv_conflict() {
+        assert!(Cli::try_parse_from(["gv", "x.gb", "-i", "--tsv"]).is_err());
+        assert!(Cli::try_parse_from(["gv", "x.gb", "-i", "-r", "1..100", "-t", "CDS"]).is_ok());
     }
 
     #[test]
