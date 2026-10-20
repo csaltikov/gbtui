@@ -18,7 +18,8 @@ gbtui -i genome.gb
 - Details panel for the selected feature: location, qualifiers, translation
   and the feature's DNA (5'→3' on its own strand; reverse-strand features are
   reverse-complemented, `join(...)` features are spliced)
-- `y` copies the selected feature's DNA to the system clipboard
+- `y` copies the selected feature's DNA to the clipboard, including over
+  SSH (via OSC 52)
 - Non-interactive mode prints a summary and feature table; `--tsv` gives
   machine-readable output for pipelines
 
@@ -59,8 +60,12 @@ nothing extra is needed on macOS (`pbcopy`). On Linux install one of
 sudo apt install wl-clipboard
 ```
 
-Over SSH there is no clipboard to copy to; the sequence is drawn on its own
-lines in the details panel so you can select it in the terminal instead.
+Over SSH, `y` also sends the sequence with the OSC 52 escape, which asks
+the terminal you are sitting at to set its clipboard. Warp, iTerm2, kitty,
+WezTerm, Alacritty and Windows Terminal support it; Apple's Terminal does
+not. Inside tmux, add `set -g set-clipboard on` to `~/.tmux.conf`. Failing
+all that, the sequence is drawn on its own lines in the details panel so it
+can be selected in the terminal.
 
 ## Usage
 

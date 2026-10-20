@@ -443,7 +443,10 @@ impl App {
             feature.label().unwrap_or(feature.kind.as_key())
         );
         self.message = Some(match copy_to_clipboard(&dna) {
-            Ok(()) => format!("Copied {what} to the clipboard"),
+            Ok(Copied::Command) => format!("Copied {what} to the clipboard"),
+            Ok(Copied::Terminal) => format!(
+                "Sent {what} to your terminal's clipboard (OSC 52; works in Warp, iTerm2, kitty, WezTerm; not Apple Terminal)"
+            ),
             Err(error) => format!("Couldn't copy {what}: {error}"),
         });
     }
@@ -902,10 +905,77 @@ fn edit_input(mut input: String, key: KeyEvent, submit: impl FnOnce(String)) -> 
     }
 }
 
-/// Put `text` on the system clipboard through the platform's clipboard
-/// command, so no extra dependency is needed: `pbcopy` on macOS, then
-/// `wl-copy`, `xclip` or `xsel` on Linux, `clip` on Windows.
-fn copy_to_clipboard(text: &[u8]) -> Result<(), String> {
+/// Where a copy ended up.
+#[derive(Debug, PartialEq, Eq)]
+enum Copied {
+    /// A clipboard command took it (`pbcopy`, `xclip`, ...).
+    Command,
+    /// Only the OSC 52 escape was sent; the terminal emulator decides.
+    Terminal,
+}
+
+/// Put `text` on the clipboard.
+///
+/// Two routes, both taken when possible. The OSC 52 escape sequence asks
+/// the terminal emulator itself to set the clipboard; it travels through
+/// SSH and tmux, so over a remote session it reaches the clipboard of the
+/// machine you are sitting at. Most modern terminals honour it (Warp,
+/// iTerm2, kitty, WezTerm, Alacritty, Windows Terminal); Apple's Terminal
+/// does not, and it fails silently, so a local clipboard command is also
+/// tried: `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, `clip`
+/// on Windows. No extra crate is needed for either.
+fn copy_to_clipboard(text: &[u8]) -> Result<Copied, String> {
+    let osc52 = send_osc52(text);
+    match copy_with_command(text) {
+        Ok(()) => Ok(Copied::Command),
+        Err(_) if osc52.is_ok() => Ok(Copied::Terminal),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write the OSC 52 clipboard escape straight to the terminal. Goes to the
+/// tty rather than stdout so it bypasses any buffering; the sequence
+/// doesn't move the cursor, so it can't disturb the frame.
+fn send_osc52(text: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+    // Inside tmux the sequence has to be wrapped in a DCS passthrough so
+    // tmux forwards it to the outer terminal (and needs `set-clipboard on`).
+    let in_tmux = std::env::var_os("TMUX").is_some();
+    let payload = format!("\x1b]52;c;{}\x07", base64(text));
+    if in_tmux {
+        write!(
+            tty,
+            "\x1bPtmux;{}\x1b\\",
+            payload.replace('\x1b', "\x1b\x1b")
+        )?;
+    } else {
+        tty.write_all(payload.as_bytes())?;
+    }
+    tty.flush()
+}
+
+/// Standard base64 with padding; enough for OSC 52 without a crate.
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, &b)| acc | (b as u32) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(TABLE[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn copy_with_command(text: &[u8]) -> Result<(), String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -944,6 +1014,15 @@ fn copy_to_clipboard(text: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn base64_matches_the_standard_encoding() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"A"), "QQ==");
+        assert_eq!(super::base64(b"AT"), "QVQ=");
+        assert_eq!(super::base64(b"ATG"), "QVRH");
+        assert_eq!(super::base64(b"ATGTCGAATATG"), "QVRHVENHQUFUQVRH");
+    }
+
     use std::path::PathBuf;
 
     use super::*;
