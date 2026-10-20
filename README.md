@@ -25,6 +25,23 @@ gbtui -i genome.gb
 
 ## Install
 
+### Prebuilt binaries
+
+Each [release](https://github.com/csaltikov/gbtui/releases) has archives for
+Linux x86_64 (statically linked, runs on any distribution), macOS Apple
+Silicon and macOS Intel. Download the one for your machine, unpack it, and
+put `gbtui` somewhere on your `PATH`:
+
+```
+tar xzf gbtui-*-x86_64-unknown-linux-musl.tar.gz
+mv gbtui-*/gbtui ~/bin/
+```
+
+On macOS, Gatekeeper may refuse an unsigned binary the first time; clear it
+with `xattr -d com.apple.quarantine ~/bin/gbtui`.
+
+### From source
+
 gbtui is written in Rust. If you don't have a Rust toolchain, install one
 first with [rustup](https://rustup.rs) (one command, no admin rights needed):
 
