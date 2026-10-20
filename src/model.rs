@@ -1,4 +1,4 @@
-//! Core data model for genome-viewer.
+//! Core data model for gbtui.
 //!
 //! Coordinates are 0-based, half-open (`start..end`), converted from GenBank's
 //! 1-based inclusive coordinates at parse time.
@@ -81,6 +81,47 @@ impl Feature {
         ["gene", "locus_tag", "product"]
             .iter()
             .find_map(|k| self.qualifier(k))
+    }
+
+    /// The feature's DNA, 5'→3' on its own strand, in upper case.
+    ///
+    /// Segments are joined in biological order, and reverse-complemented
+    /// for a reverse-strand feature, so a CDS comes out as the coding
+    /// sequence (ATG first). A mixed-strand join (`Strand::Unknown`) is
+    /// returned as written, forward strand throughout. Segments past the
+    /// end of `genome` are clipped.
+    pub fn sequence(&self, genome: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for segment in &self.location.segments {
+            let start = segment.start.min(genome.len());
+            let end = segment.end.min(genome.len());
+            let bases = genome[start..end].iter().map(u8::to_ascii_uppercase);
+            match self.location.strand {
+                Strand::Reverse => out.extend(bases.rev().map(complement)),
+                _ => out.extend(bases),
+            }
+        }
+        out
+    }
+}
+
+/// Complement of an (upper-case) IUPAC nucleotide code; anything else is
+/// returned unchanged.
+pub fn complement(base: u8) -> u8 {
+    match base {
+        b'A' => b'T',
+        b'T' | b'U' => b'A',
+        b'G' => b'C',
+        b'C' => b'G',
+        b'R' => b'Y',
+        b'Y' => b'R',
+        b'K' => b'M',
+        b'M' => b'K',
+        b'B' => b'V',
+        b'V' => b'B',
+        b'D' => b'H',
+        b'H' => b'D',
+        other => other,
     }
 }
 
@@ -169,4 +210,60 @@ pub enum Strand {
     Reverse,
     #[default]
     Unknown,
+}
+
+#[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
+mod tests {
+    use super::*;
+
+    fn feature(segments: Vec<Range<usize>>, strand: Strand) -> Feature {
+        Feature {
+            kind: FeatureKind::Cds,
+            location: Location {
+                segments,
+                strand,
+                partial_start: false,
+                partial_end: false,
+            },
+            qualifiers: Vec::new(),
+        }
+    }
+
+    const GENOME: &[u8] = b"aaatgccgtaggcttaa";
+
+    #[test]
+    fn forward_feature_is_upper_cased_slice() {
+        let f = feature(vec![2..8], Strand::Forward);
+        assert_eq!(f.sequence(GENOME), b"ATGCCG");
+    }
+
+    #[test]
+    fn reverse_feature_is_reverse_complemented() {
+        // complement(3..8) over "tgccgt" (0-based 2..8) -> "ACGGCA"
+        let f = feature(vec![2..8], Strand::Reverse);
+        assert_eq!(f.sequence(GENOME), b"CGGCAT");
+    }
+
+    #[test]
+    fn join_concatenates_in_biological_order() {
+        // complement(join(3..5,10..13)) is flattened as [9..13, 2..5]
+        let f = feature(vec![9..13, 2..5], Strand::Reverse);
+        // revcomp("aggc") + revcomp("atg") = "GCCT" + "CAT"
+        assert_eq!(f.sequence(GENOME), b"GCCTCAT");
+    }
+
+    #[test]
+    fn segments_past_the_end_are_clipped() {
+        let f = feature(vec![14..40], Strand::Forward);
+        assert_eq!(f.sequence(GENOME), b"TAA");
+    }
+
+    #[test]
+    fn complement_handles_iupac_codes() {
+        let codes = b"ACGTURYKMBVDHSWN";
+        let expected = b"TGCAAYRMKVBHDSWN";
+        let got: Vec<u8> = codes.iter().map(|&b| complement(b)).collect();
+        assert_eq!(got, expected);
+    }
 }

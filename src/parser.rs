@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn detects_format_from_contents_for_unknown_extensions() {
-        let dir = std::env::temp_dir().join(format!("genome-viewer-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gbtui-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         let gb = dir.join("genome.txt");

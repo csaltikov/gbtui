@@ -420,8 +420,32 @@ impl App {
             KeyCode::Char('f') => self.open_list(),
             KeyCode::Enter => self.jump(|app| app.zoom_to_selected()),
             KeyCode::Char('c') => self.toggle_gc_skew(),
+            KeyCode::Char('y') => self.copy_selected_dna(),
             _ => {}
         }
+    }
+
+    /// Copy the selected feature's DNA (5'→3' on its strand) to the system
+    /// clipboard, so it can be pasted outside the viewer.
+    fn copy_selected_dna(&mut self) {
+        let Some(feature) = self.selected_feature() else {
+            self.message = Some("Nothing selected; press Tab or f to pick a feature".to_string());
+            return;
+        };
+        let dna = feature.sequence(&self.record().sequence);
+        if dna.is_empty() {
+            self.message = Some("This feature has no sequence to copy".to_string());
+            return;
+        }
+        let what = format!(
+            "{} bp of {}",
+            crate::thousands(dna.len()),
+            feature.label().unwrap_or(feature.kind.as_key())
+        );
+        self.message = Some(match copy_to_clipboard(&dna) {
+            Ok(()) => format!("Copied {what} to the clipboard"),
+            Err(error) => format!("Couldn't copy {what}: {error}"),
+        });
     }
 
     fn view_state(&self) -> ViewState {
@@ -878,6 +902,46 @@ fn edit_input(mut input: String, key: KeyEvent, submit: impl FnOnce(String)) -> 
     }
 }
 
+/// Put `text` on the system clipboard through the platform's clipboard
+/// command, so no extra dependency is needed: `pbcopy` on macOS, then
+/// `wl-copy`, `xclip` or `xsel` on Linux, `clip` on Windows.
+fn copy_to_clipboard(text: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    const COMMANDS: &[&[&str]] = &[
+        &["pbcopy"],
+        &["wl-copy"],
+        &["xclip", "-selection", "clipboard"],
+        &["xsel", "--clipboard", "--input"],
+        &["clip"],
+    ];
+
+    for command in COMMANDS {
+        let Ok(mut child) = Command::new(command[0])
+            .args(&command[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue; // not installed; try the next one
+        };
+        let written = child
+            .stdin
+            .take()
+            .ok_or_else(|| "no stdin".to_string())
+            .and_then(|mut stdin| stdin.write_all(text).map_err(|e| e.to_string()));
+        let status = child.wait().map_err(|e| e.to_string())?;
+        return match written {
+            Ok(()) if status.success() => Ok(()),
+            Ok(()) => Err(format!("{} exited with {status}", command[0])),
+            Err(error) => Err(format!("{}: {error}", command[0])),
+        };
+    }
+    Err("no clipboard command found (pbcopy, wl-copy, xclip, xsel or clip)".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1157,7 +1221,7 @@ mod tests {
 
     #[test]
     fn c_toggles_gc_skew_and_saves_it() {
-        let dir = std::env::temp_dir().join(format!("genome-viewer-app-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gbtui-app-{}", std::process::id()));
         let path = dir.join("settings.conf");
         let mut app = synthetic_app(100_000).with_settings(Settings::default(), Some(path.clone()));
         assert!(app.settings.gc_skew);
@@ -1443,7 +1507,7 @@ mod tests {
 
     #[test]
     fn c_on_a_short_record_explains_and_keeps_the_setting() {
-        let dir = std::env::temp_dir().join(format!("genome-viewer-short-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gbtui-short-{}", std::process::id()));
         let path = dir.join("settings.conf");
         // The fixture is 5 kb, under the cut-off.
         let mut app = fixture_app(None).with_settings(Settings::default(), Some(path.clone()));

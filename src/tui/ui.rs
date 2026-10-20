@@ -23,6 +23,10 @@ const MIN_SKEW_WINDOW: usize = 1000;
 /// Skew that fills a bar when the view's own range is smaller, so flat
 /// regions don't get blown up into full-height noise.
 const MIN_SKEW_SCALE: f64 = 0.05;
+/// Longest feature DNA drawn in full in the details panel. Beyond this
+/// (a `source` feature, say) only the start is shown; `y` still copies
+/// all of it.
+const MAX_SHOWN_DNA: usize = 20_000;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -468,7 +472,7 @@ fn draw_gc_skew(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     let record = app.record();
     let (title, lines) = match app.selected_feature() {
-        Some(feature) => feature_details(feature),
+        Some(feature) => feature_details(feature, &record.sequence),
         None => {
             let mut lines = Vec::new();
             if let Some(definition) = &record.definition {
@@ -579,7 +583,7 @@ fn gc_summary(gc: &GcCounts, topology: Topology, len: usize) -> String {
     }
 }
 
-fn feature_details(feature: &Feature) -> (String, Vec<Line<'static>>) {
+fn feature_details(feature: &Feature, genome: &[u8]) -> (String, Vec<Line<'static>>) {
     let loc = &feature.location;
     let length: usize = loc.segments.iter().map(|s| s.len()).sum();
     let strand = match loc.strand {
@@ -619,6 +623,38 @@ fn feature_details(feature: &Feature) -> (String, Vec<Line<'static>>) {
             Span::styled(format!("{key:<width$}  "), Style::default().dim()),
             Span::raw(values.join(", ")),
         ]));
+    }
+
+    // The feature's own DNA, after the qualifiers so it sits beside the
+    // translation. On its own lines so a terminal selection picks up only
+    // bases; `y` copies it to the clipboard.
+    let dna = feature.sequence(genome);
+    if !dna.is_empty() {
+        let strand_note = match loc.strand {
+            Strand::Reverse => " (reverse complement)",
+            Strand::Unknown if loc.segments.len() > 1 => " (mixed strands, shown as written)",
+            _ => "",
+        };
+        let shown = dna.len().min(MAX_SHOWN_DNA);
+        let more = if shown < dna.len() {
+            format!("; first {} shown, y copies all", thousands(shown))
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("DNA 5'→3'{strand_note}  {} bp", thousands(dna.len())),
+                Style::default().dim(),
+            ),
+            Span::styled(
+                format!("  y: copy to clipboard{more}"),
+                Style::default().dim(),
+            ),
+        ]));
+        lines.push(Line::from(
+            String::from_utf8_lossy(&dna[..shown]).into_owned(),
+        ));
     }
 
     let title = format!(" {} ", feature.label().unwrap_or(feature.kind.as_key()));
@@ -764,6 +800,7 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "zoom to the selected feature"),
     ("c", "GC skew track on / off (remembered)"),
     ("↑ ↓ / k j", "scroll the details panel"),
+    ("y", "copy the selected feature's DNA to the clipboard"),
     ("/", "search locus tag, gene, product, protein ID"),
     ("n N", "next / previous match"),
     ("g", "go to position, START..END, or locus tag"),
@@ -873,6 +910,19 @@ mod tests {
         );
         assert!(screen.contains("5' ATGTCGAATATG"), "{screen}");
         assert!(screen.contains("3' TACAGCTTATAC"), "{screen}");
+        // The CDS's own DNA follows the qualifiers; scroll down to it.
+        for _ in 0..12 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let screen = render(&mut app, 120, 24);
+        assert!(
+            screen.contains("DNA 5'→3'  1,419 bp  y: copy to clipboard"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("ATGTCGAATATGGAACATGATCGCTGGTCTCGCG"),
+            "{screen}"
+        );
     }
 
     #[test]

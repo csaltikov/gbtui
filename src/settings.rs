@@ -1,6 +1,6 @@
 //! Viewer settings remembered between runs, stored as `key = value` lines in
-//! `$XDG_CONFIG_HOME/genome-viewer/settings.conf` (usually
-//! `~/.config/genome-viewer/settings.conf`).
+//! `$XDG_CONFIG_HOME/gbtui/settings.conf` (usually
+//! `~/.config/gbtui/settings.conf`).
 
 use std::fs;
 use std::io;
@@ -26,7 +26,7 @@ impl Settings {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("genome-viewer").join("settings.conf"))
+        Some(base.join("gbtui").join("settings.conf"))
     }
 
     /// Read settings, falling back to defaults if the file is missing or
@@ -65,7 +65,7 @@ impl Settings {
 
     fn to_text(&self) -> String {
         format!(
-            "# genome-viewer settings (written by the viewer; safe to edit or delete)\n\
+            "# gbtui settings (written by the viewer; safe to edit or delete)\n\
              gc_skew = {}\n",
             self.gc_skew
         )
@@ -84,7 +84,7 @@ mod tests {
             Settings::default()
         );
         assert_eq!(
-            Settings::load(Path::new("/nonexistent/genome-viewer/settings.conf")),
+            Settings::load(Path::new("/nonexistent/gbtui/settings.conf")),
             Settings::default()
         );
     }
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn round_trips_through_a_file() {
         let dir =
-            std::env::temp_dir().join(format!("genome-viewer-settings-{}", std::process::id()));
+            std::env::temp_dir().join(format!("gbtui-settings-{}", std::process::id()));
         let path = dir.join("nested").join("settings.conf");
 
         let off = Settings { gc_skew: false };

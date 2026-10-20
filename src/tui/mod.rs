@@ -1,4 +1,4 @@
-//! Interactive terminal viewer (`genome-viewer -i`).
+//! Interactive terminal viewer (`gbtui -i`).
 
 mod app;
 mod gc;
